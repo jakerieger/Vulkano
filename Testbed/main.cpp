@@ -3,5 +3,14 @@
 //
 
 #include <Vulkano/VulkanContext.hpp>
+#include <Vulkano/SwapchainManager.hpp>
 
-int main() {}
+int main() {
+    using namespace Vulkano;
+
+    VulkanContext ctx;
+    const auto result = ctx.Initialize({.applicationName = "Testbed"});
+    AssertResult(result);
+
+    ctx.Shutdown();
+}
