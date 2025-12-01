@@ -27,4 +27,20 @@ FetchContent_Declare(
 # Disable vk-bootstrap's strict warnings to avoid build errors
 set(VK_BOOTSTRAP_WERROR OFF CACHE BOOL "" FORCE)
 
-FetchContent_MakeAvailable(vk-bootstrap vma)
+FetchContent_Declare(
+    glfw
+    GIT_REPOSITORY https://github.com/glfw/glfw.git
+    GIT_TAG 3.4
+    GIT_SHALLOW TRUE
+)
+
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "Build GLFW docs")
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "Build GLFW tests")
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "Build GLFW examples")
+set(GLFW_INSTALL OFF CACHE BOOL "Generate GLFW installation target")
+
+FetchContent_MakeAvailable(
+    vk-bootstrap
+    vma
+    glfw
+)

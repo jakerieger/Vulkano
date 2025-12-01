@@ -3,21 +3,30 @@
 //
 
 #include "VulkanContext.hpp"
-#include "VkBootstrap.h"
+
+#include <VkBootstrap.h>
 
 namespace Vulkano {
+    struct VulkanContext::Impl {
+        std::unique_ptr<vkb::Instance> vkbInstance;
+        std::unique_ptr<vkb::PhysicalDevice> vkbPhysicalDevice;
+        std::unique_ptr<vkb::Device> vkbDevice;
+    };
+
+    VulkanContext::VulkanContext() : mImpl(std::make_unique<Impl>()) {}
+
     VulkanContext::~VulkanContext() {
         Shutdown();
     }
 
-    Result<void> VulkanContext::Initialize(const Config& config) {
-        if (mInitialized) { return std::unexpected("Context already initialized"); }
+    Result<void> VulkanContext::CreateInstance(const InstanceConfig& config) {
+        if (HasInstance()) { return std::unexpected("Instance already created"); }
 
         mValidationEnabled = config.enableValidation;
 
         // Create instance using vk-bootstrap
         vkb::InstanceBuilder instanceBuilder;
-        instanceBuilder.set_app_name(config.applicationName.data())
+        instanceBuilder.set_app_name(config.applicationName)
           .set_app_version(config.applicationVersion)
           .require_api_version(1, 3, 0);
 
@@ -35,12 +44,23 @@ namespace Vulkano {
             return std::unexpected(std::string("Failed to create instance: ") + instanceResult.error().message());
         }
 
-        mVkbInstance = std::make_unique<vkb::Instance>(instanceResult.value());
-        mInstance    = mVkbInstance->instance;
+        mImpl->vkbInstance = std::make_unique<vkb::Instance>(instanceResult.value());
+        mInstance          = mImpl->vkbInstance->instance;
+
+        return {};
+    }
+
+    Result<void> VulkanContext::CreateDevice(const DeviceConfig& config) {
+        if (!HasInstance()) { return std::unexpected("Instance must be created before device"); }
+
+        if (HasDevice()) { return std::unexpected("Device already created"); }
 
         // Select physical device
-        vkb::PhysicalDeviceSelector selector(*mVkbInstance);
-        selector.set_minimum_version(1, 3).require_present();
+        vkb::PhysicalDeviceSelector selector(*mImpl->vkbInstance);
+        selector.set_minimum_version(1, 3).prefer_gpu_device_type(vkb::PreferredDeviceType::discrete);
+
+        // Set surface if provided for presentation support
+        if (config.surface != VK_NULL_HANDLE) { selector.set_surface(config.surface); }
 
         // Add requested device extensions
         for (const char* ext : config.deviceExtensions) {
@@ -53,67 +73,83 @@ namespace Vulkano {
                                    physicalDeviceResult.error().message());
         }
 
-        mVkbPhysicalDevice = std::make_unique<vkb::PhysicalDevice>(physicalDeviceResult.value());
-        mPhysicalDevice    = mVkbPhysicalDevice->physical_device;
+        mImpl->vkbPhysicalDevice = std::make_unique<vkb::PhysicalDevice>(physicalDeviceResult.value());
+        mPhysicalDevice          = mImpl->vkbPhysicalDevice->physical_device;
 
         // Get device properties and features
         vkGetPhysicalDeviceProperties(mPhysicalDevice, &mDeviceProperties);
         vkGetPhysicalDeviceFeatures(mPhysicalDevice, &mDeviceFeatures);
 
         // Create logical device
-        vkb::DeviceBuilder deviceBuilder(*mVkbPhysicalDevice);
+        vkb::DeviceBuilder deviceBuilder(*mImpl->vkbPhysicalDevice);
 
         auto deviceResult = deviceBuilder.build();
         if (!deviceResult) {
             return std::unexpected(std::string("Failed to create device: ") + deviceResult.error().message());
         }
 
-        mVkbDevice = std::make_unique<vkb::Device>(deviceResult.value());
-        mDevice    = mVkbDevice->device;
+        mImpl->vkbDevice = std::make_unique<vkb::Device>(deviceResult.value());
+        mDevice          = mImpl->vkbDevice->device;
 
         // Get queues
-        auto graphicsQueueResult = mVkbDevice->get_queue(vkb::QueueType::graphics);
-        auto computeQueueResult  = mVkbDevice->get_queue(vkb::QueueType::compute);
-        auto transferQueueResult = mVkbDevice->get_queue(vkb::QueueType::transfer);
-        auto presentQueueResult  = mVkbDevice->get_queue(vkb::QueueType::present);
-
-        if (!graphicsQueueResult || !presentQueueResult) { return std::unexpected("Failed to get required queues"); }
-
+        auto graphicsQueueResult = mImpl->vkbDevice->get_queue(vkb::QueueType::graphics);
+        if (!graphicsQueueResult) { return std::unexpected("Failed to get graphics queue"); }
         mGraphicsQueue = graphicsQueueResult.value();
-        mPresentQueue  = presentQueueResult.value();
+
+        // Get optional queues (compute, transfer)
+        auto computeQueueResult  = mImpl->vkbDevice->get_queue(vkb::QueueType::compute);
+        auto transferQueueResult = mImpl->vkbDevice->get_queue(vkb::QueueType::transfer);
+
         mComputeQueue  = computeQueueResult.has_value() ? computeQueueResult.value() : mGraphicsQueue;
         mTransferQueue = transferQueueResult.has_value() ? transferQueueResult.value() : mGraphicsQueue;
 
-        // Get queue family indices
-        auto graphicsFamilyResult = mVkbDevice->get_queue_index(vkb::QueueType::graphics);
-        auto computeFamilyResult  = mVkbDevice->get_queue_index(vkb::QueueType::compute);
-        auto transferFamilyResult = mVkbDevice->get_queue_index(vkb::QueueType::transfer);
-        auto presentFamilyResult  = mVkbDevice->get_queue_index(vkb::QueueType::present);
-
-        if (graphicsFamilyResult && presentFamilyResult) {
-            mQueueFamilies.graphicsFamily = graphicsFamilyResult.value();
-            mQueueFamilies.presentFamily  = presentFamilyResult.value();
-            mQueueFamilies.computeFamily =
-              computeFamilyResult.has_value() ? computeFamilyResult.value() : mQueueFamilies.graphicsFamily;
-            mQueueFamilies.transferFamily =
-              transferFamilyResult.has_value() ? transferFamilyResult.value() : mQueueFamilies.graphicsFamily;
-
-            mQueueFamilies.hasDiscreteCompute =
-              computeFamilyResult.has_value() && computeFamilyResult.value() != mQueueFamilies.graphicsFamily;
-            mQueueFamilies.hasDiscreteTransfer =
-              transferFamilyResult.has_value() && transferFamilyResult.value() != mQueueFamilies.graphicsFamily;
+        // Only get present queue if surface was provided
+        if (config.surface != VK_NULL_HANDLE) {
+            auto presentQueueResult = mImpl->vkbDevice->get_queue(vkb::QueueType::present);
+            mPresentQueue           = presentQueueResult.has_value() ? presentQueueResult.value() : mGraphicsQueue;
+        } else {
+            mPresentQueue = mGraphicsQueue;
         }
+
+        // Get queue family indices
+        auto graphicsFamilyResult = mImpl->vkbDevice->get_queue_index(vkb::QueueType::graphics);
+        auto computeFamilyResult  = mImpl->vkbDevice->get_queue_index(vkb::QueueType::compute);
+        auto transferFamilyResult = mImpl->vkbDevice->get_queue_index(vkb::QueueType::transfer);
+
+        if (!graphicsFamilyResult) { return std::unexpected("Failed to get graphics queue family index"); }
+
+        mQueueFamilies.graphicsFamily = graphicsFamilyResult.value();
+        mQueueFamilies.computeFamily =
+          computeFamilyResult.has_value() ? computeFamilyResult.value() : mQueueFamilies.graphicsFamily;
+        mQueueFamilies.transferFamily =
+          transferFamilyResult.has_value() ? transferFamilyResult.value() : mQueueFamilies.graphicsFamily;
+
+        if (config.surface != VK_NULL_HANDLE) {
+            auto presentFamilyResult = mImpl->vkbDevice->get_queue_index(vkb::QueueType::present);
+            mQueueFamilies.presentFamily =
+              presentFamilyResult.has_value() ? presentFamilyResult.value() : mQueueFamilies.graphicsFamily;
+        } else {
+            mQueueFamilies.presentFamily = mQueueFamilies.graphicsFamily;
+        }
+
+        mQueueFamilies.hasDiscreteCompute =
+          computeFamilyResult.has_value() && computeFamilyResult.value() != mQueueFamilies.graphicsFamily;
+        mQueueFamilies.hasDiscreteTransfer =
+          transferFamilyResult.has_value() && transferFamilyResult.value() != mQueueFamilies.graphicsFamily;
 
         // Initialize VMA
         if (auto result = InitializeAllocator(); !result) { return result; }
 
-        mInitialized = true;
         return {};
     }
 
-    void VulkanContext::Shutdown() {
-        if (!mInitialized) { return; }
+    Result<void> VulkanContext::Initialize(const Config& config) {
+        if (auto result = CreateInstance(config.instance); !result) { return result; }
 
+        return CreateDevice(config.device);
+    }
+
+    void VulkanContext::Shutdown() {
         WaitIdle();
 
         if (mAllocator) {
@@ -121,19 +157,22 @@ namespace Vulkano {
             mAllocator = VK_NULL_HANDLE;
         }
 
-        if (mVkbDevice) {
-            vkb::destroy_device(*mVkbDevice);
-            mVkbDevice.reset();
+        if (mImpl->vkbDevice) {
+            vkb::destroy_device(*mImpl->vkbDevice);
+            mImpl->vkbDevice.reset();
             mDevice = VK_NULL_HANDLE;
         }
 
-        if (mVkbInstance) {
-            vkb::destroy_instance(*mVkbInstance);
-            mVkbInstance.reset();
-            mInstance = VK_NULL_HANDLE;
+        if (mImpl->vkbPhysicalDevice) {
+            mImpl->vkbPhysicalDevice.reset();
+            mPhysicalDevice = VK_NULL_HANDLE;
         }
 
-        mInitialized = false;
+        if (mImpl->vkbInstance) {
+            vkb::destroy_instance(*mImpl->vkbInstance);
+            mImpl->vkbInstance.reset();
+            mInstance = VK_NULL_HANDLE;
+        }
     }
 
     void VulkanContext::WaitIdle() const {

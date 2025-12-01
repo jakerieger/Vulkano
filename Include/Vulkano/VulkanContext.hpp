@@ -11,28 +11,33 @@
 #include <memory>
 #include <vector>
 
-namespace vkb {
-    struct Instance;
-    struct PhysicalDevice;
-    struct Device;
-}  // namespace vkb
-
 namespace Vulkano {
     class SwapchainManager;
 
     /// @brief Core Vulkan context managing instance, device, and queues
     class VulkanContext {
     public:
-        /// @brief Configuration for context creation
-        struct Config {
-            const std::string_view applicationName {"Vulkano Application"};
+        /// @brief Configuration for instance creation
+        struct InstanceConfig {
+            const char* applicationName {"Vulkano Application"};
             u32 applicationVersion {VK_MAKE_VERSION(1, 0, 0)};
             bool enableValidation {true};
-            std::vector<const char*> instanceExtensions;
-            std::vector<const char*> deviceExtensions;
+            std::vector<const char*> instanceExtensions {};
         };
 
-        VulkanContext() = default;
+        /// @brief Configuration for device creation
+        struct DeviceConfig {
+            std::vector<const char*> deviceExtensions {};
+            VkSurfaceKHR surface {VK_NULL_HANDLE};  // Optional, for presentation support
+        };
+
+        /// @brief Full configuration (for convenience method)
+        struct Config {
+            InstanceConfig instance;
+            DeviceConfig device;
+        };
+
+        VulkanContext();
         ~VulkanContext();
 
         VulkanContext(const VulkanContext&)            = delete;
@@ -40,21 +45,39 @@ namespace Vulkano {
         VulkanContext(VulkanContext&&)                 = delete;
         VulkanContext& operator=(VulkanContext&&)      = delete;
 
-        /// @brief Initialize the Vulkan context
-        /// @param config Configuration parameters
+        /// @brief Create Vulkan instance
+        /// @param config Instance configuration
+        /// @return Result containing success or error message
+        Result<void> CreateInstance(const InstanceConfig& config);
+
+        /// @brief Create logical device (call after CreateInstance and optionally after surface creation)
+        /// @param config Device configuration
+        /// @return Result containing success or error message
+        Result<void> CreateDevice(const DeviceConfig& config);
+
+        /// @brief Convenience method to create instance and device in one call
+        /// @param config Full configuration
         /// @return Result containing success or error message
         Result<void> Initialize(const Config& config);
-
-        /// @brief Initialize with default configuration
-        Result<void> Initialize() {
-            return Initialize(Config {});
-        }
 
         /// @brief Shutdown and cleanup all Vulkan resources
         void Shutdown();
 
         /// @brief Wait for all device operations to complete
         void WaitIdle() const;
+
+        // State queries
+        V_ND bool HasInstance() const {
+            return mInstance != VK_NULL_HANDLE;
+        }
+
+        V_ND bool HasDevice() const {
+            return mDevice != VK_NULL_HANDLE;
+        }
+
+        V_ND bool IsInitialized() const {
+            return HasInstance() && HasDevice();
+        }
 
         // Getters
         V_ND VkInstance GetInstance() const {
@@ -101,10 +124,6 @@ namespace Vulkano {
             return mDeviceFeatures;
         }
 
-        V_ND bool IsInitialized() const {
-            return mInitialized;
-        }
-
     private:
         /// @brief Initialize VMA allocator
         Result<void> InitializeAllocator();
@@ -123,12 +142,10 @@ namespace Vulkano {
         VkPhysicalDeviceProperties mDeviceProperties {};
         VkPhysicalDeviceFeatures mDeviceFeatures {};
 
-        // vk-bootstrap objects (stored as opaque pointers to avoid header pollution)
-        std::unique_ptr<vkb::Instance> mVkbInstance;
-        std::unique_ptr<vkb::PhysicalDevice> mVkbPhysicalDevice;
-        std::unique_ptr<vkb::Device> mVkbDevice;
+        // Pimpl for vk-bootstrap objects
+        struct Impl;
+        std::unique_ptr<Impl> mImpl;
 
-        bool mInitialized {false};
         bool mValidationEnabled {false};
     };
 }  // namespace Vulkano
